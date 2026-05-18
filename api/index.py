@@ -1080,6 +1080,12 @@ document.addEventListener('click',function(e){
 /* Init multi-selects */
 document.querySelectorAll('.ms-wrap').forEach(function(w){updateTriggerText(w);updatePills(w)});
 
+/* Sync all hidden inputs before form submit */
+var mf=document.getElementById('mainForm');
+if(mf){mf.addEventListener('submit',function(){
+    document.querySelectorAll('.ms-wrap').forEach(function(w){syncHiddenInputs(w)});
+})}
+
 /* --- TABS --- */
 function showTab(el,id){
     el.parentElement.querySelectorAll('.tab').forEach(function(t){t.classList.remove('active')});
@@ -1155,18 +1161,24 @@ def forecast():
         selected_methods = request.form.getlist("methods")
     else:
         selected_groups = all_groups
-        selected_items = all_items[:1]
+        selected_items = all_items
         selected_metric = all_metrics[0] if all_metrics else ""
-        selected_methods = ["Seasonal Naive", "Holt-Winters (Multiplicative)",
-                           "Linear Trend + Seasonality", "Ensemble (Best-of-3)"]
+        selected_methods = list(FORECAST_METHODS.keys())
 
-    if not selected_items:
-        selected_items = all_items[:1]
+    if not selected_groups:
+        selected_groups = all_groups
     if not selected_methods:
-        selected_methods = ["Ensemble (Best-of-3)"]
+        selected_methods = list(FORECAST_METHODS.keys())
+
+    # Filter items by selected groups
+    group_items = df[df["New MIS ITEM Group"].isin(selected_groups)]["Item_Name"].unique().tolist()
+    filtered_items = sorted(set(all_items) & set(group_items))
+    selected_items = [it for it in selected_items if it in filtered_items]
+    if not selected_items:
+        selected_items = filtered_items[:5]
 
     results = []
-    for item_name in selected_items[:10]:
+    for item_name in selected_items[:20]:
         row = df[(df["Item_Name"] == item_name) & (df["Metric"] == selected_metric)]
         if row.empty:
             continue
@@ -1202,7 +1214,7 @@ def forecast():
     return render_template_string(TEMPLATE,
         data_loaded=True,
         all_groups=all_groups, selected_groups=selected_groups,
-        all_items=all_items, selected_items=selected_items,
+        all_items=filtered_items, selected_items=selected_items,
         all_metrics=all_metrics, selected_metric=selected_metric,
         all_methods=all_methods, selected_methods=selected_methods,
         forecast_months=forecast_months, results=results,
