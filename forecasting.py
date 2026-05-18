@@ -1,10 +1,10 @@
 """
 Forecasting methods for Farmley Sales Data.
+Pure numpy/pandas implementation — no statsmodels or scipy needed.
 Each function takes a pd.Series with DatetimeIndex (monthly) and returns a list of 9 forecasted values.
 """
 import numpy as np
 import pandas as pd
-from scipy.optimize import minimize
 
 
 def _safe_series(s):
@@ -20,11 +20,7 @@ def seasonal_naive_forecast(series):
     if not ok:
         return [0.0] * 9
     n = len(vals)
-    forecast = []
-    for i in range(9):
-        src_idx = i % n
-        forecast.append(max(0, vals[src_idx]))
-    return forecast
+    return [max(0.0, float(vals[i % n])) for i in range(9)]
 
 
 # ─── 2. MOVING AVERAGE ──────────────────────────────────────────────────────────
@@ -34,8 +30,7 @@ def moving_average_forecast(series, window=3):
         return [0.0] * 9
     extended = list(vals)
     for _ in range(9):
-        avg = np.mean(extended[-window:])
-        extended.append(max(0, avg))
+        extended.append(max(0.0, float(np.mean(extended[-window:]))))
     return extended[len(vals):]
 
 
@@ -44,7 +39,7 @@ def weighted_moving_average_forecast(series):
     vals, ok = _safe_series(series)
     if not ok:
         return [0.0] * 9
-    weights = np.array([0.1, 0.15, 0.2, 0.25, 0.3])
+    weights = np.array([0.10, 0.15, 0.20, 0.25, 0.30])
     w_len = len(weights)
     extended = list(vals)
     for _ in range(9):
@@ -54,8 +49,7 @@ def weighted_moving_average_forecast(series):
             w = w / w.sum()
         else:
             w = weights
-        wma = np.dot(window, w)
-        extended.append(max(0, wma))
+        extended.append(max(0.0, float(np.dot(window, w))))
     return extended[len(vals):]
 
 
@@ -66,23 +60,22 @@ def exponential_smoothing_forecast(series):
         return [0.0] * 9
     n = len(vals)
 
-    def sse(alpha):
-        a = alpha[0]
+    best_alpha, best_sse = 0.3, float("inf")
+    for a_int in range(5, 96, 5):
+        a = a_int / 100.0
         f = [vals[0]]
         for t in range(1, n):
             f.append(a * vals[t - 1] + (1 - a) * f[-1])
-        return np.sum((vals[1:] - np.array(f[1:])) ** 2)
-
-    res = minimize(sse, [0.3], bounds=[(0.01, 0.99)], method="L-BFGS-B")
-    alpha = res.x[0]
+        sse = float(np.sum((vals[1:] - np.array(f[1:])) ** 2))
+        if sse < best_sse:
+            best_sse = sse
+            best_alpha = a
 
     f = [vals[0]]
     for t in range(1, n):
-        f.append(alpha * vals[t - 1] + (1 - alpha) * f[-1])
-
-    last_f = alpha * vals[-1] + (1 - alpha) * f[-1]
-    forecast = [max(0, last_f)] * 9
-    return forecast
+        f.append(best_alpha * vals[t - 1] + (1 - best_alpha) * f[-1])
+    last_f = best_alpha * vals[-1] + (1 - best_alpha) * f[-1]
+    return [max(0.0, float(last_f))] * 9
 
 
 # ─── 5. HOLT-WINTERS ────────────────────────────────────────────────────────────
@@ -91,7 +84,6 @@ def holt_winters_forecast(series, seasonal="mul"):
     if not ok:
         return [0.0] * 9
     n = len(vals)
-
     if n < 4:
         return moving_average_forecast(series, window=3)
 
@@ -100,18 +92,86 @@ def holt_winters_forecast(series, seasonal="mul"):
     if seasonal == "mul" and np.any(vals[:period] <= 0):
         seasonal = "add"
 
-    try:
-        from statsmodels.tsa.holtwinters import ExponentialSmoothing
-        model = ExponentialSmoothing(
-            vals, trend="add", seasonal=seasonal,
-            seasonal_periods=period,
-            initialization_method="estimated",
-        )
-        fit = model.fit(optimized=True, use_brute=True)
-        fc = fit.forecast(9)
-        return [max(0, v) for v in fc]
-    except Exception:
-        return _linear_trend_seasonal_core(vals, period)
+    best_fc, best_sse = None, float("inf")
+
+    for alpha_i in range(10, 91, 20):
+        for beta_i in range(1, 52, 25):
+            for gamma_i in range(10, 91, 20):
+                a = alpha_i / 100.0
+                b = beta_i / 100.0
+                g = gamma_i / 100.0
+                try:
+                    fc = _hw_core(vals, n, period, a, b, g, seasonal)
+                    fitted = _hw_fitted(vals, n, period, a, b, g, seasonal)
+                    sse = float(np.sum((vals[period:] - np.array(fitted[period:])) ** 2))
+                    if sse < best_sse:
+                        best_sse = sse
+                        best_fc = fc
+                except Exception:
+                    continue
+
+    if best_fc is not None:
+        return best_fc
+    return _linear_trend_seasonal_core(vals, period)
+
+
+def _hw_core(vals, n, period, alpha, beta, gamma, seasonal):
+    level = np.mean(vals[:period])
+    trend = (np.mean(vals[period // 2:period]) - np.mean(vals[:period // 2])) / (period // 2) if period >= 4 else 0.0
+
+    if seasonal == "mul":
+        season = np.array([vals[i] / max(level, 1e-10) for i in range(period)])
+    else:
+        season = np.array([vals[i] - level for i in range(period)])
+
+    for t in range(period, n):
+        si = t % period
+        if seasonal == "mul":
+            new_level = alpha * (vals[t] / max(season[si], 1e-10)) + (1 - alpha) * (level + trend)
+            new_trend = beta * (new_level - level) + (1 - beta) * trend
+            season[si] = gamma * (vals[t] / max(new_level, 1e-10)) + (1 - gamma) * season[si]
+        else:
+            new_level = alpha * (vals[t] - season[si]) + (1 - alpha) * (level + trend)
+            new_trend = beta * (new_level - level) + (1 - beta) * trend
+            season[si] = gamma * (vals[t] - new_level) + (1 - gamma) * season[si]
+        level = new_level
+        trend = new_trend
+
+    forecast = []
+    for h in range(1, 10):
+        si = (n + h - 1) % period
+        if seasonal == "mul":
+            forecast.append(max(0.0, float((level + h * trend) * season[si])))
+        else:
+            forecast.append(max(0.0, float(level + h * trend + season[si])))
+    return forecast
+
+
+def _hw_fitted(vals, n, period, alpha, beta, gamma, seasonal):
+    level = np.mean(vals[:period])
+    trend = (np.mean(vals[period // 2:period]) - np.mean(vals[:period // 2])) / (period // 2) if period >= 4 else 0.0
+
+    if seasonal == "mul":
+        season = np.array([vals[i] / max(level, 1e-10) for i in range(period)])
+    else:
+        season = np.array([vals[i] - level for i in range(period)])
+
+    fitted = list(vals[:period])
+    for t in range(period, n):
+        si = t % period
+        if seasonal == "mul":
+            fitted.append(float((level + trend) * season[si]))
+            new_level = alpha * (vals[t] / max(season[si], 1e-10)) + (1 - alpha) * (level + trend)
+            new_trend = beta * (new_level - level) + (1 - beta) * trend
+            season[si] = gamma * (vals[t] / max(new_level, 1e-10)) + (1 - gamma) * season[si]
+        else:
+            fitted.append(float(level + trend + season[si]))
+            new_level = alpha * (vals[t] - season[si]) + (1 - alpha) * (level + trend)
+            new_trend = beta * (new_level - level) + (1 - beta) * trend
+            season[si] = gamma * (vals[t] - new_level) + (1 - gamma) * season[si]
+        level = new_level
+        trend = new_trend
+    return fitted
 
 
 # ─── 6. LINEAR TREND + SEASONALITY ──────────────────────────────────────────────
@@ -124,23 +184,25 @@ def linear_trend_forecast(series):
 
 def _linear_trend_seasonal_core(vals, period):
     n = len(vals)
-    t = np.arange(n)
+    t = np.arange(n, dtype=float)
 
-    coeffs = np.polyfit(t, vals, 1)
-    trend_line = np.polyval(coeffs, t)
+    t_mean = np.mean(t)
+    v_mean = np.mean(vals)
+    slope = np.sum((t - t_mean) * (vals - v_mean)) / max(np.sum((t - t_mean) ** 2), 1e-10)
+    intercept = v_mean - slope * t_mean
+    trend_line = intercept + slope * t
 
-    if np.any(trend_line == 0):
-        ratios = vals - trend_line
+    if np.any(np.abs(trend_line) < 1e-10):
+        deseason = vals - trend_line
         seasonal_idx = np.zeros(period)
         for i in range(period):
-            month_vals = [ratios[j] for j in range(i, n, period)]
-            seasonal_idx[i] = np.mean(month_vals) if month_vals else 0
+            month_vals = [deseason[j] for j in range(i, n, period)]
+            seasonal_idx[i] = np.mean(month_vals) if month_vals else 0.0
         forecast = []
         for i in range(9):
             future_t = n + i
-            trend_val = np.polyval(coeffs, future_t)
-            s_idx = (n + i) % period
-            forecast.append(max(0, trend_val + seasonal_idx[s_idx]))
+            trend_val = intercept + slope * future_t
+            forecast.append(max(0.0, float(trend_val + seasonal_idx[(n + i) % period])))
     else:
         ratios = vals / trend_line
         seasonal_idx = np.ones(period)
@@ -150,45 +212,56 @@ def _linear_trend_seasonal_core(vals, period):
         forecast = []
         for i in range(9):
             future_t = n + i
-            trend_val = np.polyval(coeffs, future_t)
-            s_idx = (n + i) % period
-            forecast.append(max(0, trend_val * seasonal_idx[s_idx]))
-
+            trend_val = intercept + slope * future_t
+            forecast.append(max(0.0, float(trend_val * seasonal_idx[(n + i) % period])))
     return forecast
 
 
-# ─── 7. SEASONAL DECOMPOSITION ──────────────────────────────────────────────────
+# ─── 7. SEASONAL DECOMPOSITION (manual STL-like) ────────────────────────────────
 def seasonal_decomposition_forecast(series):
     vals, ok = _safe_series(series)
     if not ok:
         return [0.0] * 9
     n = len(vals)
     period = min(12, n)
-
     if n < 4:
         return moving_average_forecast(series, window=3)
 
-    try:
-        from statsmodels.tsa.seasonal import STL
-        s = pd.Series(vals, index=pd.date_range("2025-04-01", periods=n, freq="MS"))
-        stl = STL(s, period=period, robust=True)
-        result = stl.fit()
-
-        trend = result.trend.values
-        seasonal = result.seasonal.values
-
-        t_idx = np.arange(n)
-        coeffs = np.polyfit(t_idx, trend, 1)
-
-        forecast = []
-        for i in range(9):
-            future_t = n + i
-            trend_val = np.polyval(coeffs, future_t)
-            s_val = seasonal[(n + i) % period]
-            forecast.append(max(0, trend_val + s_val))
-        return forecast
-    except Exception:
+    # Moving average to extract trend
+    if period >= 3:
+        half = period // 2
+        trend = np.full(n, np.nan)
+        for i in range(half, n - half):
+            start = max(0, i - half)
+            end = min(n, i + half + 1)
+            trend[i] = np.mean(vals[start:end])
+        mask = ~np.isnan(trend)
+        if np.sum(mask) < 2:
+            return _linear_trend_seasonal_core(vals, period)
+        t_idx = np.arange(n, dtype=float)
+        t_valid = t_idx[mask]
+        trend_valid = trend[mask]
+        t_mean = np.mean(t_valid)
+        tr_mean = np.mean(trend_valid)
+        slope = np.sum((t_valid - t_mean) * (trend_valid - tr_mean)) / max(np.sum((t_valid - t_mean) ** 2), 1e-10)
+        intercept = tr_mean - slope * t_mean
+        full_trend = intercept + slope * t_idx
+    else:
         return _linear_trend_seasonal_core(vals, period)
+
+    detrended = vals - full_trend
+    seasonal = np.zeros(period)
+    for i in range(period):
+        month_vals = [detrended[j] for j in range(i, n, period)]
+        seasonal[i] = np.mean(month_vals) if month_vals else 0.0
+
+    forecast = []
+    for i in range(9):
+        future_t = n + i
+        trend_val = intercept + slope * future_t
+        s_val = seasonal[(n + i) % period]
+        forecast.append(max(0.0, float(trend_val + s_val)))
+    return forecast
 
 
 # ─── 8. ENSEMBLE ────────────────────────────────────────────────────────────────
@@ -204,12 +277,10 @@ def ensemble_forecast(series):
             results.append(fn(series))
         except Exception:
             pass
-
     if not results:
         return [0.0] * 9
-
     arr = np.array(results)
-    return [max(0, v) for v in np.median(arr, axis=0)]
+    return [max(0.0, float(v)) for v in np.median(arr, axis=0)]
 
 
 # ─── METHOD DESCRIPTIONS ────────────────────────────────────────────────────────
@@ -255,9 +326,9 @@ METHOD_DESCRIPTIONS = {
 """,
 
     "Exponential Smoothing": """
-**Concept:** A weighted average where the weight (alpha) decays exponentially for older observations. Alpha is optimized by minimizing sum of squared errors on historical data.
+**Concept:** A weighted average where the weight (alpha) decays exponentially for older observations. Alpha is optimized by grid search minimizing sum of squared errors on historical data.
 
-**Formula:** `F(t) = α * A(t-1) + (1-α) * F(t-1)`, where α is optimized (0 < α < 1).
+**Formula:** `F(t) = α * A(t-1) + (1-α) * F(t-1)`, where α is optimized (0.05 to 0.95).
 
 **When it works well:** Good for items with no trend or seasonality — produces a "best level estimate."
 
@@ -265,7 +336,7 @@ METHOD_DESCRIPTIONS = {
 """,
 
     "Holt-Winters (Additive)": """
-**Concept:** Extends exponential smoothing with trend and additive seasonal components. The model has three equations updating level, trend, and seasonal factors.
+**Concept:** Extends exponential smoothing with trend and additive seasonal components. Three equations update level, trend, and seasonal factors. Parameters (α, β, γ) optimized via grid search.
 
 **Formula:**
 - Level: `L(t) = α(Y(t) - S(t-p)) + (1-α)(L(t-1) + T(t-1))`
@@ -286,7 +357,7 @@ METHOD_DESCRIPTIONS = {
 - Seasonal: `S(t) = γ(Y(t) / L(t)) + (1-γ)S(t-p)`
 - Forecast: `F(t+h) = (L(t) + h*T(t)) * S(t+h-p)`
 
-**When it works well:** Best for your data — when seasonal peaks scale proportionally with the level (e.g., September is always ~2x average, not always +5000 units). This is common in FMCG/food products like Farmley's.
+**When it works well:** Best for FMCG data — when seasonal peaks scale proportionally with the level (e.g., September is always ~2x average). This is common in food products like Farmley's.
 
 **Limitation:** Cannot handle zero values (division by zero). Falls back to additive when zeros exist.
 """,
@@ -305,14 +376,15 @@ METHOD_DESCRIPTIONS = {
 """,
 
     "Seasonal Decomposition (STL)": """
-**Concept:** Uses STL (Seasonal and Trend decomposition using LOESS) to separate the time series into trend, seasonal, and residual components. Trend is extrapolated forward using linear regression, and the seasonal pattern repeats.
+**Concept:** Separates the time series into trend, seasonal, and residual components using centered moving averages. Trend is extrapolated forward using linear regression, and the seasonal pattern repeats.
 
 **Formula:**
-1. STL decomposes: `Y(t) = Trend(t) + Seasonal(t) + Residual(t)`
-2. Extrapolate trend linearly
-3. Forecast: `F(t) = Extrapolated_Trend(t) + Seasonal(t mod period)`
+1. Extract trend via centered moving average (window = seasonal period)
+2. Detrended = Actual - Trend
+3. Seasonal = average of detrended values for each month position
+4. Forecast: `F(t) = Extrapolated_Trend(t) + Seasonal(t mod period)`
 
-**When it works well:** Most robust decomposition method — handles non-linear trends better than classical decomposition. Good for noisy data.
+**When it works well:** Good for noisy data where you want to separate signal from noise.
 
 **Limitation:** With only 12 months of data, the decomposition may not fully separate trend from seasonal. Better with 2+ years of data.
 """,
