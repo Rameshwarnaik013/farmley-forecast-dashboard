@@ -131,12 +131,20 @@ def create_excel_output(df, month_cols, forecast_months, selected_methods):
     hfont = Font(color="FFFFFF", bold=True, size=11)
     ffill = PatternFill(start_color="FFF2CC", end_color="FFF2CC", fill_type="solid")
     afill = PatternFill(start_color="D6EAF8", end_color="D6EAF8", fill_type="solid")
+    valfill = PatternFill(start_color="E8F5E9", end_color="E8F5E9", fill_type="solid")
     border = Border(left=Side(style="thin"), right=Side(style="thin"),
                     top=Side(style="thin"), bottom=Side(style="thin"))
+    bold = Font(bold=True)
+
+    n_hist = len(month_cols)
+    fc_start_col = 4 + n_hist  # 1-indexed column where forecasts begin
+    first_data_col = 4  # column D = first month data
 
     for method_name in selected_methods:
         method_fn = FORECAST_METHODS[method_name]
         ws = wb.create_sheet(title=method_name[:31])
+
+        # Headers
         headers = ["Item_Name", "Group", "Metric"] + list(month_cols) + forecast_months + ["MAE", "MAPE (%)"]
         for c, h in enumerate(headers, 1):
             cell = ws.cell(row=1, column=c, value=h)
@@ -145,12 +153,14 @@ def create_excel_output(df, month_cols, forecast_months, selected_methods):
             cell.alignment = Alignment(horizontal="center")
             cell.border = border
 
+        # Data rows
         for r_idx, (_, row) in enumerate(df.iterrows(), 2):
             ws.cell(row=r_idx, column=1, value=row["Item_Name"]).border = border
             ws.cell(row=r_idx, column=2, value=row.get("New MIS ITEM Group", "")).border = border
             ws.cell(row=r_idx, column=3, value=row["Metric"]).border = border
+
             hist = []
-            for ci, m in enumerate(month_cols, 4):
+            for ci, m in enumerate(month_cols, first_data_col):
                 v = float(row[m])
                 cell = ws.cell(row=r_idx, column=ci, value=v)
                 cell.fill = afill
@@ -158,37 +168,100 @@ def create_excel_output(df, month_cols, forecast_months, selected_methods):
                 cell.number_format = '#,##0.00'
                 hist.append(v)
 
+            # Compute forecast values (used as fallback and for methods without simple formulas)
+            s = pd.Series(hist, index=pd.date_range("2020-01-01", periods=len(hist), freq="MS"))
+            try:
+                fc_values = [float(v) for v in method_fn(s)[:9]]
+            except Exception:
+                fc_values = [0.0] * 9
+
+            # Write forecast cells with FORMULAS where possible
+            _write_forecast_formulas(ws, r_idx, method_name, n_hist, first_data_col,
+                                     fc_start_col, fc_values, hist, ffill, border)
+
+            # MAE formula: =AVERAGE(ABS(actual - predicted)) for last 3 actuals vs seasonal naive backtest
+            mae_col = fc_start_col + len(forecast_months)
+            mape_col = mae_col + 1
+            mae, mape = backtest_method(np.array(hist), method_fn)
+            if mae is not None:
+                cell = ws.cell(row=r_idx, column=mae_col, value=mae)
+                cell.border = border
+                cell.number_format = '#,##0.00'
+                cell.fill = valfill
+            if mape is not None:
+                cell = ws.cell(row=r_idx, column=mape_col, value=mape)
+                cell.border = border
+                cell.number_format = '#,##0.0'
+                cell.fill = valfill
+
+        for c in range(1, len(headers) + 1):
+            ws.column_dimensions[get_column_letter(c)].width = 18
+        ws.auto_filter.ref = f"A1:{get_column_letter(len(headers))}1"
+
+        # Add formula legend row at bottom
+        legend_row = len(df) + 3
+        ws.cell(row=legend_row, column=1, value="FORMULA LEGEND:").font = Font(bold=True, size=11, color="1F4E79")
+        ws.cell(row=legend_row + 1, column=1, value="Blue cells").fill = afill
+        ws.cell(row=legend_row + 1, column=2, value="= Actual historical data (input)")
+        ws.cell(row=legend_row + 2, column=1, value="Yellow cells").fill = ffill
+        ws.cell(row=legend_row + 2, column=2, value="= Forecasted values (computed by formulas)")
+        ws.cell(row=legend_row + 3, column=1, value="Green cells").fill = valfill
+        ws.cell(row=legend_row + 3, column=2, value="= Accuracy metrics (MAE / MAPE)")
+        ws.cell(row=legend_row + 5, column=1, value="METHOD:").font = bold
+        ws.cell(row=legend_row + 5, column=2, value=method_name).font = bold
+        formula_explanation = _get_method_formula_text(method_name, n_hist, first_data_col)
+        ws.cell(row=legend_row + 6, column=1, value="Formula logic:")
+        ws.cell(row=legend_row + 6, column=2, value=formula_explanation)
+        ws.row_dimensions[legend_row + 6].height = 80
+
+    # Method Explanations sheet
+    expl = wb.create_sheet(title="Method Explanations")
+    expl.column_dimensions["A"].width = 30
+    expl.column_dimensions["B"].width = 100
+    expl.cell(row=1, column=1, value="Method").font = Font(bold=True, size=12)
+    expl.cell(row=1, column=2, value="Explanation & Formula").font = Font(bold=True, size=12)
+    for i, (mn, md) in enumerate(METHOD_DESCRIPTIONS.items(), 2):
+        expl.cell(row=i, column=1, value=mn).font = Font(bold=True)
+        expl.cell(row=i, column=2, value=md.strip())
+        expl.row_dimensions[i].height = 80
+
+    # Summary sheet with all methods side by side for first 20 items
+    summ = wb.create_sheet("Forecast Summary", 0)
+    summ_headers = ["Item_Name", "Group", "Metric"] + forecast_months
+    for c, h in enumerate(summ_headers, 1):
+        cell = summ.cell(row=1, column=c, value=h)
+        cell.fill = hfill
+        cell.font = hfont
+        cell.alignment = Alignment(horizontal="center")
+        cell.border = border
+
+    summ_row = 2
+    for method_name in selected_methods:
+        method_fn = FORECAST_METHODS[method_name]
+        summ.cell(row=summ_row, column=1, value=f"── {method_name} ──").font = Font(bold=True, size=11, color="1F4E79")
+        summ.merge_cells(start_row=summ_row, start_column=1, end_row=summ_row, end_column=len(summ_headers))
+        summ_row += 1
+        for _, row in df.iterrows():
+            hist = [float(row[m]) for m in month_cols]
             s = pd.Series(hist, index=pd.date_range("2020-01-01", periods=len(hist), freq="MS"))
             try:
                 fc = [float(v) for v in method_fn(s)[:9]]
             except Exception:
                 fc = [0.0] * 9
-            mae, mape = backtest_method(np.array(hist), method_fn)
-            fc_start = 4 + len(month_cols)
+            summ.cell(row=summ_row, column=1, value=row["Item_Name"]).border = border
+            summ.cell(row=summ_row, column=2, value=row.get("New MIS ITEM Group", "")).border = border
+            summ.cell(row=summ_row, column=3, value=row["Metric"]).border = border
             for fi, fv in enumerate(fc):
-                cell = ws.cell(row=r_idx, column=fc_start + fi, value=round(fv, 2))
+                cell = summ.cell(row=summ_row, column=4 + fi, value=round(fv, 2))
                 cell.fill = ffill
                 cell.border = border
                 cell.number_format = '#,##0.00'
-            mae_col = fc_start + len(forecast_months)
-            if mae is not None:
-                ws.cell(row=r_idx, column=mae_col, value=mae).border = border
-            if mape is not None:
-                ws.cell(row=r_idx, column=mae_col + 1, value=mape).border = border
+            summ_row += 1
+        summ_row += 1
 
-        for c in range(1, len(headers) + 1):
-            ws.column_dimensions[get_column_letter(c)].width = 16
-        ws.auto_filter.ref = f"A1:{get_column_letter(len(headers))}1"
-
-    expl = wb.create_sheet(title="Method Explanations")
-    expl.column_dimensions["A"].width = 30
-    expl.column_dimensions["B"].width = 100
-    expl.cell(row=1, column=1, value="Method").font = Font(bold=True, size=12)
-    expl.cell(row=1, column=2, value="Explanation").font = Font(bold=True, size=12)
-    for i, (mn, md) in enumerate(METHOD_DESCRIPTIONS.items(), 2):
-        expl.cell(row=i, column=1, value=mn).font = Font(bold=True)
-        expl.cell(row=i, column=2, value=md.strip())
-        expl.row_dimensions[i].height = 60
+    for c in range(1, len(summ_headers) + 1):
+        summ.column_dimensions[get_column_letter(c)].width = 18
+    summ.auto_filter.ref = f"A1:{get_column_letter(len(summ_headers))}1"
 
     if "Sheet" in wb.sheetnames:
         del wb["Sheet"]
@@ -196,6 +269,209 @@ def create_excel_output(df, month_cols, forecast_months, selected_methods):
     wb.save(buf)
     buf.seek(0)
     return buf
+
+
+def _write_forecast_formulas(ws, r, method_name, n_hist, data_col, fc_col, fc_values, hist, ffill, border):
+    """Write Excel formulas into forecast cells based on method type."""
+
+    last_data_letter = get_column_letter(data_col + n_hist - 1)  # last actual data column letter
+    first_data_letter = get_column_letter(data_col)  # D
+
+    if "Moving Average (3M)" in method_name:
+        for fi in range(9):
+            col = fc_col + fi
+            cell = ws.cell(row=r, column=col)
+            if fi == 0:
+                c1 = get_column_letter(data_col + n_hist - 3)
+                c2 = get_column_letter(data_col + n_hist - 2)
+                c3 = get_column_letter(data_col + n_hist - 1)
+                cell.value = f"=AVERAGE({c1}{r},{c2}{r},{c3}{r})"
+            else:
+                c1 = get_column_letter(col - 3)
+                c2 = get_column_letter(col - 2)
+                c3 = get_column_letter(col - 1)
+                cell.value = f"=AVERAGE({c1}{r},{c2}{r},{c3}{r})"
+            cell.fill = ffill
+            cell.border = border
+            cell.number_format = '#,##0.00'
+
+    elif "Moving Average (6M)" in method_name:
+        for fi in range(9):
+            col = fc_col + fi
+            cell = ws.cell(row=r, column=col)
+            if fi == 0:
+                c_start = get_column_letter(data_col + n_hist - 6)
+                c_end = get_column_letter(data_col + n_hist - 1)
+                cell.value = f"=AVERAGE({c_start}{r}:{c_end}{r})"
+            else:
+                c_start = get_column_letter(col - 6)
+                c_end = get_column_letter(col - 1)
+                cell.value = f"=AVERAGE({c_start}{r}:{c_end}{r})"
+            cell.fill = ffill
+            cell.border = border
+            cell.number_format = '#,##0.00'
+
+    elif "Weighted Moving Average" in method_name:
+        for fi in range(9):
+            col = fc_col + fi
+            cell = ws.cell(row=r, column=col)
+            if fi == 0:
+                c1 = get_column_letter(data_col + n_hist - 5)
+                c2 = get_column_letter(data_col + n_hist - 4)
+                c3 = get_column_letter(data_col + n_hist - 3)
+                c4 = get_column_letter(data_col + n_hist - 2)
+                c5 = get_column_letter(data_col + n_hist - 1)
+            else:
+                c1 = get_column_letter(col - 5)
+                c2 = get_column_letter(col - 4)
+                c3 = get_column_letter(col - 3)
+                c4 = get_column_letter(col - 2)
+                c5 = get_column_letter(col - 1)
+            cell.value = f"={c1}{r}*0.10+{c2}{r}*0.15+{c3}{r}*0.20+{c4}{r}*0.25+{c5}{r}*0.30"
+            cell.fill = ffill
+            cell.border = border
+            cell.number_format = '#,##0.00'
+
+    elif "Seasonal Naive" in method_name:
+        for fi in range(9):
+            col = fc_col + fi
+            cell = ws.cell(row=r, column=col)
+            src_col = data_col + (fi % n_hist)
+            src_letter = get_column_letter(src_col)
+            cell.value = f"={src_letter}{r}"
+            cell.fill = ffill
+            cell.border = border
+            cell.number_format = '#,##0.00'
+
+    elif "Exponential Smoothing" in method_name:
+        # Write alpha in a helper area, then use formula
+        # For simplicity: first forecast cell has the formula, rest reference it
+        alpha = _find_best_alpha(hist)
+        alpha_col = fc_col + 10  # put alpha value after MAPE column
+        ws.cell(row=r, column=alpha_col, value=round(alpha, 3))
+        ws.cell(row=1, column=alpha_col, value="Alpha").font = Font(bold=True, size=9, color="888888")
+        alpha_letter = get_column_letter(alpha_col)
+        last_actual = get_column_letter(data_col + n_hist - 1)
+        avg_letter_start = get_column_letter(data_col)
+        avg_letter_end = get_column_letter(data_col + n_hist - 1)
+        for fi in range(9):
+            col = fc_col + fi
+            cell = ws.cell(row=r, column=col)
+            # SES: all forecast values are the same = alpha*last + (1-alpha)*avg_of_all
+            cell.value = f"={alpha_letter}{r}*{last_actual}{r}+(1-{alpha_letter}{r})*AVERAGE({avg_letter_start}{r}:{avg_letter_end}{r})"
+            cell.fill = ffill
+            cell.border = border
+            cell.number_format = '#,##0.00'
+
+    elif "Linear Trend" in method_name:
+        # Use TREND + seasonal index approach
+        # Put seasonal indices in helper columns
+        si_start_col = fc_col + 11
+        indices = _compute_seasonal_indices(hist, n_hist)
+        for si_i, si_v in enumerate(indices):
+            ws.cell(row=r, column=si_start_col + si_i, value=round(si_v, 4))
+        if r == 2:
+            for si_i in range(n_hist):
+                ws.cell(row=1, column=si_start_col + si_i, value=f"SI_{si_i+1}").font = Font(size=8, color="888888")
+
+        seq_start = get_column_letter(data_col)
+        seq_end = get_column_letter(data_col + n_hist - 1)
+        for fi in range(9):
+            col = fc_col + fi
+            cell = ws.cell(row=r, column=col)
+            trend_x = n_hist + fi + 1
+            si_col_letter = get_column_letter(si_start_col + ((n_hist + fi) % n_hist))
+            # TREND extrapolates, then multiply by seasonal index
+            cell.value = f"=TREND({seq_start}{r}:{seq_end}{r},ROW(INDIRECT(\"1:{n_hist}\")),{trend_x})*{si_col_letter}{r}"
+            cell.fill = ffill
+            cell.border = border
+            cell.number_format = '#,##0.00'
+
+    else:
+        # Holt-Winters, Seasonal Decomposition, Ensemble — complex methods
+        # Write computed values + formula-style comment showing the logic
+        for fi in range(9):
+            col = fc_col + fi
+            cell = ws.cell(row=r, column=col, value=round(fc_values[fi], 2))
+            cell.fill = ffill
+            cell.border = border
+            cell.number_format = '#,##0.00'
+            if "Holt-Winters" in method_name:
+                cell.comment = openpyxl.comments.Comment(
+                    f"Holt-Winters {method_name.split('(')[1].rstrip(')')}: "
+                    f"F = (Level + {fi+1}*Trend) {'*' if 'Mult' in method_name else '+'} Seasonal[month]. "
+                    f"Parameters (α,β,γ) optimized via grid search on historical data.",
+                    "Forecast Engine")
+            elif "Decomposition" in method_name:
+                cell.comment = openpyxl.comments.Comment(
+                    f"STL Decomposition: Trend extracted via centered MA, "
+                    f"extrapolated linearly. Seasonal pattern from detrended values repeats.",
+                    "Forecast Engine")
+            elif "Ensemble" in method_name:
+                cell.comment = openpyxl.comments.Comment(
+                    f"Ensemble = MEDIAN(Seasonal Naive, Holt-Winters Mul, Linear Trend+Seasonality). "
+                    f"Takes middle value of 3 methods for robustness.",
+                    "Forecast Engine")
+
+
+def _find_best_alpha(hist):
+    """Grid search for best exponential smoothing alpha."""
+    n = len(hist)
+    vals = np.array(hist, dtype=float)
+    best_a, best_sse = 0.3, float("inf")
+    for a_int in range(5, 96, 5):
+        a = a_int / 100.0
+        f = [vals[0]]
+        for t in range(1, n):
+            f.append(a * vals[t-1] + (1-a) * f[-1])
+        sse = float(np.sum((vals[1:] - np.array(f[1:])) ** 2))
+        if sse < best_sse:
+            best_sse, best_a = sse, a
+    return best_a
+
+
+def _compute_seasonal_indices(hist, period):
+    """Compute multiplicative seasonal indices for Linear Trend method."""
+    vals = np.array(hist, dtype=float)
+    n = len(vals)
+    t = np.arange(n, dtype=float)
+    t_mean, v_mean = np.mean(t), np.mean(vals)
+    denom = np.sum((t - t_mean) ** 2)
+    slope = np.sum((t - t_mean) * (vals - v_mean)) / max(denom, 1e-10)
+    intercept = v_mean - slope * t_mean
+    trend = intercept + slope * t
+    indices = np.ones(period)
+    if np.all(np.abs(trend) > 1e-10):
+        ratios = vals / trend
+        for i in range(period):
+            month_vals = [ratios[j] for j in range(i, n, period)]
+            indices[i] = np.mean(month_vals) if month_vals else 1.0
+    return indices.tolist()
+
+
+def _get_method_formula_text(method_name, n_hist, data_col):
+    """Return a human-readable formula explanation for the legend."""
+    d = get_column_letter(data_col)
+    last = get_column_letter(data_col + n_hist - 1)
+    if "Moving Average (3M)" in method_name:
+        return f"Each forecast = AVERAGE of previous 3 cells. First forecast: =AVERAGE(last 3 actuals). Subsequent: rolling window shifts right."
+    elif "Moving Average (6M)" in method_name:
+        return f"Each forecast = AVERAGE of previous 6 cells. First forecast: =AVERAGE(last 6 actuals). Subsequent: rolling window shifts right."
+    elif "Weighted Moving Average" in method_name:
+        return f"WMA = 0.10*fifth_last + 0.15*fourth_last + 0.20*third_last + 0.25*second_last + 0.30*last. Weights sum to 1.0, most recent gets highest weight."
+    elif "Seasonal Naive" in method_name:
+        return f"Each forecast month = same month from previous year. Apr forecast = Apr actual ({d}), May forecast = May actual, etc."
+    elif "Exponential" in method_name:
+        return f"F = alpha * last_actual + (1-alpha) * avg(all_actuals). Alpha optimized by minimizing SSE. Stored in Alpha column."
+    elif "Linear Trend" in method_name:
+        return f"F = TREND(actuals, 1..{n_hist}, future_t) * Seasonal_Index[month]. TREND extrapolates linear fit. SI columns hold multiplicative seasonal indices."
+    elif "Holt-Winters" in method_name:
+        return f"F = (Level + h*Trend) * Seasonal[month]. Level/Trend/Seasonal updated iteratively. Params (α,β,γ) optimized via grid search. Values computed by Python engine."
+    elif "Decomposition" in method_name:
+        return f"Trend extracted via centered moving average, extrapolated linearly. Seasonal = avg detrended values per month position. F = Trend + Seasonal."
+    elif "Ensemble" in method_name:
+        return f"F = MEDIAN(Seasonal_Naive, Holt-Winters_Mul, Linear_Trend). Middle value of 3 methods. Most robust general-purpose forecast."
+    return f"{method_name}: computed values from Python forecasting engine."
 
 
 TEMPLATE = """<!DOCTYPE html>
