@@ -264,6 +264,107 @@ def seasonal_decomposition_forecast(series):
     return forecast
 
 
+def holt_winters_components(series, seasonal="mul"):
+    """Return (level, trend, seasonal_factors, period, seasonal_type) for Excel helper columns."""
+    vals, ok = _safe_series(series)
+    if not ok:
+        return 0.0, 0.0, [0.0]*12, 12, seasonal
+    n = len(vals)
+    if n < 4:
+        return 0.0, 0.0, [1.0]*12, 12, seasonal
+    period = min(12, n)
+    if seasonal == "mul" and np.any(vals[:period] <= 0):
+        seasonal = "add"
+
+    best_params = None
+    best_sse = float("inf")
+    for alpha_i in range(10, 91, 20):
+        for beta_i in range(1, 52, 25):
+            for gamma_i in range(10, 91, 20):
+                a, b, g = alpha_i/100.0, beta_i/100.0, gamma_i/100.0
+                try:
+                    fitted = _hw_fitted(vals, n, period, a, b, g, seasonal)
+                    sse = float(np.sum((vals[period:] - np.array(fitted[period:])) ** 2))
+                    if sse < best_sse:
+                        best_sse = sse
+                        best_params = (a, b, g)
+                except Exception:
+                    continue
+
+    if best_params is None:
+        return 0.0, 0.0, [1.0 if seasonal == "mul" else 0.0]*period, period, seasonal
+
+    a, b, g = best_params
+    level = np.mean(vals[:period])
+    trend = (np.mean(vals[period//2:period]) - np.mean(vals[:period//2])) / (period//2) if period >= 4 else 0.0
+    if seasonal == "mul":
+        season = np.array([vals[i] / max(level, 1e-10) for i in range(period)])
+    else:
+        season = np.array([vals[i] - level for i in range(period)])
+
+    for t in range(period, n):
+        si = t % period
+        if seasonal == "mul":
+            new_level = a * (vals[t] / max(season[si], 1e-10)) + (1-a) * (level + trend)
+            new_trend = b * (new_level - level) + (1-b) * trend
+            season[si] = g * (vals[t] / max(new_level, 1e-10)) + (1-g) * season[si]
+        else:
+            new_level = a * (vals[t] - season[si]) + (1-a) * (level + trend)
+            new_trend = b * (new_level - level) + (1-b) * trend
+            season[si] = g * (vals[t] - new_level) + (1-g) * season[si]
+        level = new_level
+        trend = new_trend
+
+    return float(level), float(trend), [float(s) for s in season], period, seasonal
+
+
+def seasonal_decomposition_components(series):
+    """Return (intercept, slope, seasonal_factors, period) for Excel helper columns."""
+    vals, ok = _safe_series(series)
+    if not ok:
+        return 0.0, 0.0, [0.0]*12, 12
+    n = len(vals)
+    period = min(12, n)
+    if n < 4:
+        return 0.0, 0.0, [0.0]*period, period
+
+    if period >= 3:
+        half = period // 2
+        trend_arr = np.full(n, np.nan)
+        for i in range(half, n - half):
+            start = max(0, i - half)
+            end = min(n, i + half + 1)
+            trend_arr[i] = np.mean(vals[start:end])
+        mask = ~np.isnan(trend_arr)
+        if np.sum(mask) < 2:
+            t = np.arange(n, dtype=float)
+            t_mean, v_mean = np.mean(t), np.mean(vals)
+            slope = np.sum((t - t_mean) * (vals - v_mean)) / max(np.sum((t - t_mean)**2), 1e-10)
+            intercept = v_mean - slope * t_mean
+        else:
+            t_idx = np.arange(n, dtype=float)
+            t_valid = t_idx[mask]
+            trend_valid = trend_arr[mask]
+            t_mean = np.mean(t_valid)
+            tr_mean = np.mean(trend_valid)
+            slope = np.sum((t_valid - t_mean) * (trend_valid - tr_mean)) / max(np.sum((t_valid - t_mean)**2), 1e-10)
+            intercept = tr_mean - slope * t_mean
+    else:
+        t = np.arange(n, dtype=float)
+        t_mean, v_mean = np.mean(t), np.mean(vals)
+        slope = np.sum((t - t_mean) * (vals - v_mean)) / max(np.sum((t - t_mean)**2), 1e-10)
+        intercept = v_mean - slope * t_mean
+
+    full_trend = intercept + slope * np.arange(n, dtype=float)
+    detrended = vals - full_trend
+    seasonal = np.zeros(period)
+    for i in range(period):
+        month_vals = [detrended[j] for j in range(i, n, period)]
+        seasonal[i] = np.mean(month_vals) if month_vals else 0.0
+
+    return float(intercept), float(slope), [float(s) for s in seasonal], period
+
+
 # ─── 8. ENSEMBLE ────────────────────────────────────────────────────────────────
 def ensemble_forecast(series):
     methods = [

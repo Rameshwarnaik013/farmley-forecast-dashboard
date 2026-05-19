@@ -18,9 +18,11 @@ from forecasting import (
     weighted_moving_average_forecast,
     exponential_smoothing_forecast,
     holt_winters_forecast,
+    holt_winters_components,
     linear_trend_forecast,
     seasonal_naive_forecast,
     seasonal_decomposition_forecast,
+    seasonal_decomposition_components,
     ensemble_forecast,
     METHOD_DESCRIPTIONS,
 )
@@ -145,6 +147,13 @@ def create_excel_output(df, month_cols, forecast_months, selected_methods):
     n_hist = len(month_cols)
     fc_start_col = 4 + n_hist
     first_data_col = 4
+
+    # Ensemble needs these 3 sheets to exist for cross-sheet MEDIAN references
+    ensemble_deps = ["Seasonal Naive", "Holt-Winters (Multiplicative)", "Linear Trend + Seasonality"]
+    if "Ensemble (Best-of-3)" in selected_methods:
+        for dep in ensemble_deps:
+            if dep not in selected_methods:
+                selected_methods.append(dep)
 
     for method_name in selected_methods:
         method_fn = FORECAST_METHODS[method_name]
@@ -377,6 +386,76 @@ def _write_forecast_formulas(ws, r, method_name, n_hist, data_col, fc_col, fc_va
             cell.border = border
             cell.number_format = '#,##0.00'
 
+    elif "Holt-Winters" in method_name:
+        seasonal_type = "mul" if "Multiplicativ" in method_name else "add"
+        s = pd.Series(hist, index=pd.date_range("2020-01-01", periods=len(hist), freq="MS"))
+        level, trend, season, period, stype = holt_winters_components(s, seasonal_type)
+        # Helper columns: Level, Trend, Seasonal[0..period-1]
+        helper_start = fc_col + 11
+        ws.cell(row=r, column=helper_start, value=round(level, 4))
+        ws.cell(row=r, column=helper_start + 1, value=round(trend, 4))
+        for si_i, sv in enumerate(season):
+            ws.cell(row=r, column=helper_start + 2 + si_i, value=round(sv, 4))
+        if r == 2:
+            ws.cell(row=1, column=helper_start, value="HW_Level").font = Font(size=8, color="888888")
+            ws.cell(row=1, column=helper_start + 1, value="HW_Trend").font = Font(size=8, color="888888")
+            for si_i in range(period):
+                ws.cell(row=1, column=helper_start + 2 + si_i, value=f"HW_S{si_i+1}").font = Font(size=8, color="888888")
+        lev_col = get_column_letter(helper_start)
+        trn_col = get_column_letter(helper_start + 1)
+        for fi in range(9):
+            col = fc_col + fi
+            cell = ws.cell(row=r, column=col)
+            h = fi + 1
+            si = (n_hist + fi) % period
+            s_col = get_column_letter(helper_start + 2 + si)
+            if stype == "mul":
+                cell.value = f"=({lev_col}{r}+{h}*{trn_col}{r})*{s_col}{r}"
+            else:
+                cell.value = f"={lev_col}{r}+{h}*{trn_col}{r}+{s_col}{r}"
+            cell.fill = ffill
+            cell.border = border
+            cell.number_format = '#,##0.00'
+
+    elif "Decomposition" in method_name:
+        s = pd.Series(hist, index=pd.date_range("2020-01-01", periods=len(hist), freq="MS"))
+        intercept, slope, seasonal, period = seasonal_decomposition_components(s)
+        helper_start = fc_col + 11
+        ws.cell(row=r, column=helper_start, value=round(intercept, 4))
+        ws.cell(row=r, column=helper_start + 1, value=round(slope, 6))
+        for si_i, sv in enumerate(seasonal):
+            ws.cell(row=r, column=helper_start + 2 + si_i, value=round(sv, 4))
+        if r == 2:
+            ws.cell(row=1, column=helper_start, value="STL_Intcpt").font = Font(size=8, color="888888")
+            ws.cell(row=1, column=helper_start + 1, value="STL_Slope").font = Font(size=8, color="888888")
+            for si_i in range(period):
+                ws.cell(row=1, column=helper_start + 2 + si_i, value=f"STL_S{si_i+1}").font = Font(size=8, color="888888")
+        int_col = get_column_letter(helper_start)
+        slp_col = get_column_letter(helper_start + 1)
+        for fi in range(9):
+            col = fc_col + fi
+            cell = ws.cell(row=r, column=col)
+            future_t = n_hist + fi
+            si = (n_hist + fi) % period
+            s_col = get_column_letter(helper_start + 2 + si)
+            cell.value = f"={int_col}{r}+{slp_col}{r}*{future_t}+{s_col}{r}"
+            cell.fill = ffill
+            cell.border = border
+            cell.number_format = '#,##0.00'
+
+    elif "Ensemble" in method_name:
+        sn_sheet = "Seasonal Naive"[:31]
+        hw_sheet = "Holt-Winters (Multiplicativ"[:31]
+        lt_sheet = "Linear Trend + Seasonality"[:31]
+        for fi in range(9):
+            col = fc_col + fi
+            cell = ws.cell(row=r, column=col)
+            fc_letter = get_column_letter(col)
+            cell.value = f"=MEDIAN('{sn_sheet}'!{fc_letter}{r},'{hw_sheet}'!{fc_letter}{r},'{lt_sheet}'!{fc_letter}{r})"
+            cell.fill = ffill
+            cell.border = border
+            cell.number_format = '#,##0.00'
+
     else:
         for fi in range(9):
             col = fc_col + fi
@@ -384,22 +463,6 @@ def _write_forecast_formulas(ws, r, method_name, n_hist, data_col, fc_col, fc_va
             cell.fill = ffill
             cell.border = border
             cell.number_format = '#,##0.00'
-            if "Holt-Winters" in method_name:
-                cell.comment = openpyxl.comments.Comment(
-                    f"Holt-Winters {method_name.split('(')[1].rstrip(')')}: "
-                    f"F = (Level + {fi+1}*Trend) {'*' if 'Mult' in method_name else '+'} Seasonal[month]. "
-                    f"Parameters optimized via grid search on historical data.",
-                    "Forecast Engine")
-            elif "Decomposition" in method_name:
-                cell.comment = openpyxl.comments.Comment(
-                    f"STL Decomposition: Trend extracted via centered MA, "
-                    f"extrapolated linearly. Seasonal pattern from detrended values repeats.",
-                    "Forecast Engine")
-            elif "Ensemble" in method_name:
-                cell.comment = openpyxl.comments.Comment(
-                    f"Ensemble = MEDIAN(Seasonal Naive, Holt-Winters Mul, Linear Trend+Seasonality). "
-                    f"Takes middle value of 3 methods for robustness.",
-                    "Forecast Engine")
 
 
 def _find_best_alpha(hist):
@@ -451,11 +514,12 @@ def _get_method_formula_text(method_name, n_hist, data_col):
     elif "Linear Trend" in method_name:
         return f"F = TREND(actuals, 1..{n_hist}, future_t) * Seasonal_Index[month]. TREND extrapolates linear fit. SI columns hold multiplicative seasonal indices."
     elif "Holt-Winters" in method_name:
-        return "F = (Level + h*Trend) * Seasonal[month]. Level/Trend/Seasonal updated iteratively. Params optimized via grid search. Values computed by Python engine."
+        op = "*" if "Multiplicativ" in method_name else "+"
+        return f"F = (HW_Level + h*HW_Trend) {op} HW_S[month]. Helper columns store optimized Level, Trend, and Seasonal factors. Click any yellow cell to see the formula."
     elif "Decomposition" in method_name:
-        return "Trend extracted via centered moving average, extrapolated linearly. Seasonal = avg detrended values per month position. F = Trend + Seasonal."
+        return "F = STL_Intercept + STL_Slope * t + STL_S[month]. Helper columns store trend intercept, slope, and seasonal offsets from centered MA decomposition."
     elif "Ensemble" in method_name:
-        return "F = MEDIAN(Seasonal_Naive, Holt-Winters_Mul, Linear_Trend). Middle value of 3 methods. Most robust general-purpose forecast."
+        return "F = MEDIAN('Seasonal Naive'!cell, 'Holt-Winters (Multiplicativ'!cell, 'Linear Trend + Seasonality'!cell). Cross-sheet MEDIAN formula."
     return f"{method_name}: computed values from Python forecasting engine."
 
 
@@ -715,6 +779,33 @@ if(dz){
         <div class="st"><div class="st-label">Months of Data</div><div class="st-val">{{n_months}}</div></div>
     </div>
 
+    {% if overall_chart %}
+    <div class="card" style="border-left:3px solid #10b981">
+        <div class="item-head">
+            <h2>Overall Aggregate</h2>
+            <span class="tag" style="background:#ecfdf5;color:#065f46">{{results|length}} items combined</span>
+            <span class="tag">{{selected_metric}}</span>
+        </div>
+        <div id="chart_overall" style="width:100%;height:460px"></div>
+        <script>Plotly.newPlot('chart_overall',{{overall_chart|safe}}.data,{{overall_chart|safe}}.layout,{responsive:true})</script>
+    </div>
+    {% endif %}
+
+    {% if group_charts %}
+    {% for gc in group_charts %}
+    <div class="card" style="border-left:3px solid #f59e0b">
+        <div class="item-head">
+            <h2>{{gc.group}}</h2>
+            <span class="tag" style="background:#fffbeb;color:#92400e">{{gc.count}} items</span>
+            <span class="tag">{{selected_metric}}</span>
+            <span class="tag" style="background:#f5f3ff;color:#7c3aed">Group Total</span>
+        </div>
+        <div id="chart_grp_{{loop.index0}}" style="width:100%;height:440px"></div>
+        <script>Plotly.newPlot('chart_grp_{{loop.index0}}',{{gc.chart_data|safe}}.data,{{gc.chart_data|safe}}.layout,{responsive:true})</script>
+    </div>
+    {% endfor %}
+    {% endif %}
+
     {% for item_data in results %}
     <div class="card item-card">
         <div class="item-head">
@@ -961,6 +1052,49 @@ def forecast():
             "accuracy": accuracy,
         })
 
+    # Build overall aggregate chart (sum across all selected items)
+    overall_chart = None
+    if results:
+        agg_hist = np.zeros(len(month_cols))
+        agg_forecasts = {m: np.zeros(9) for m in selected_methods}
+        for rd in results:
+            row = df[(df["Item_Name"] == rd["item"]) & (df["Metric"] == selected_metric)]
+            if not row.empty:
+                agg_hist += row.iloc[0][month_cols].values.astype(float)
+            for m in selected_methods:
+                agg_forecasts[m] += np.array(rd["forecasts"].get(m, [0.0]*9))
+        agg_fc_dict = {m: agg_forecasts[m].tolist() for m in selected_methods}
+        overall_chart = build_chart_json(
+            f"All Selected Items ({len(results)})", selected_metric,
+            agg_hist, agg_fc_dict, month_cols, forecast_months
+        )
+
+    # Build group-level aggregate charts
+    group_charts = []
+    if results:
+        groups_in_results = {}
+        for rd in results:
+            g = rd["group"]
+            if g not in groups_in_results:
+                groups_in_results[g] = {"hist": np.zeros(len(month_cols)),
+                                        "fc": {m: np.zeros(9) for m in selected_methods},
+                                        "count": 0}
+            row = df[(df["Item_Name"] == rd["item"]) & (df["Metric"] == selected_metric)]
+            if not row.empty:
+                groups_in_results[g]["hist"] += row.iloc[0][month_cols].values.astype(float)
+            for m in selected_methods:
+                groups_in_results[g]["fc"][m] += np.array(rd["forecasts"].get(m, [0.0]*9))
+            groups_in_results[g]["count"] += 1
+        for gname, gdata in sorted(groups_in_results.items()):
+            if gdata["count"] < 2:
+                continue  # skip groups with only 1 item (already shown in item view)
+            gc_dict = {m: gdata["fc"][m].tolist() for m in selected_methods}
+            gc_json = build_chart_json(
+                f"{gname} ({gdata['count']} items)", selected_metric,
+                gdata["hist"], gc_dict, month_cols, forecast_months
+            )
+            group_charts.append({"group": gname, "count": gdata["count"], "chart_data": gc_json})
+
     desc_html = {k: md_to_html(v) for k, v in METHOD_DESCRIPTIONS.items()}
 
     return render_template_string(TEMPLATE,
@@ -970,6 +1104,7 @@ def forecast():
         all_metrics=all_metrics, selected_metric=selected_metric,
         all_methods=all_methods, selected_methods=selected_methods,
         forecast_months=forecast_months, results=results,
+        overall_chart=overall_chart, group_charts=group_charts,
         total_items=len(all_items), last_month=month_cols[-1],
         n_months=len(month_cols),
         method_descriptions=desc_html,
