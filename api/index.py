@@ -270,6 +270,93 @@ def create_excel_output(df, month_cols, forecast_months, selected_methods):
         summ.column_dimensions[get_column_letter(c)].width = 18
     summ.auto_filter.ref = f"A1:{get_column_letter(len(summ_headers))}1"
 
+    # ── BEST METHOD (OPTIMAL) TAB ──
+    best_ws = wb.create_sheet(title="Best Method (Optimal)", index=0)
+    bestfill = PatternFill(start_color="E8F5E9", end_color="E8F5E9", fill_type="solid")
+    bestfill_hdr = PatternFill(start_color="1B5E20", end_color="1B5E20", fill_type="solid")
+    best_hfont = Font(color="FFFFFF", bold=True, size=11)
+    goldfill = PatternFill(start_color="FFF8E1", end_color="FFF8E1", fill_type="solid")
+
+    best_headers = ["Item_Name", "Group", "Metric", "Best Method", "MAE", "MAPE (%)"] + forecast_months
+    for c, h in enumerate(best_headers, 1):
+        cell = best_ws.cell(row=1, column=c, value=h)
+        cell.fill = bestfill_hdr
+        cell.font = best_hfont
+        cell.alignment = Alignment(horizontal="center")
+        cell.border = border
+
+    all_method_names = list(FORECAST_METHODS.keys())
+    for r_idx, (_, row) in enumerate(df.iterrows(), 2):
+        hist = [float(row[m]) for m in month_cols]
+        s = pd.Series(hist, index=pd.date_range("2020-01-01", periods=len(hist), freq="MS"))
+
+        best_method = None
+        best_mape = float("inf")
+        best_mae = None
+        for mname in all_method_names:
+            fn = FORECAST_METHODS[mname]
+            mae, mape = backtest_method(np.array(hist), fn)
+            if mape is not None and mape < best_mape:
+                best_mape = mape
+                best_mae = mae
+                best_method = mname
+
+        if best_method is None:
+            best_method = "Ensemble (Best-of-3)"
+            best_mae, best_mape = None, None
+
+        best_ws.cell(row=r_idx, column=1, value=row["Item_Name"]).border = border
+        best_ws.cell(row=r_idx, column=2, value=row.get("New MIS ITEM Group", "")).border = border
+        best_ws.cell(row=r_idx, column=3, value=row["Metric"]).border = border
+        cell = best_ws.cell(row=r_idx, column=4, value=best_method)
+        cell.border = border
+        cell.fill = goldfill
+        cell.font = Font(bold=True, color="5D4037")
+        if best_mae is not None:
+            cell = best_ws.cell(row=r_idx, column=5, value=best_mae)
+            cell.border = border
+            cell.number_format = '#,##0.00'
+            cell.fill = bestfill
+        if best_mape is not None:
+            cell = best_ws.cell(row=r_idx, column=6, value=best_mape)
+            cell.border = border
+            cell.number_format = '#,##0.0'
+            cell.fill = bestfill
+
+        # Write forecast formulas referencing the best method's sheet
+        best_sheet_title = best_method[:31]
+        if best_sheet_title in wb.sheetnames:
+            for fi in range(9):
+                col = 7 + fi
+                src_col_letter = get_column_letter(fc_start_col + fi)
+                cell = best_ws.cell(row=r_idx, column=col)
+                cell.value = f"='{best_sheet_title}'!{src_col_letter}{r_idx}"
+                cell.fill = goldfill
+                cell.border = border
+                cell.number_format = '#,##0.00'
+        else:
+            # Method sheet doesn't exist — write static values
+            fn = FORECAST_METHODS[best_method]
+            try:
+                fc = [float(v) for v in fn(s)[:9]]
+            except Exception:
+                fc = [0.0] * 9
+            for fi in range(9):
+                cell = best_ws.cell(row=r_idx, column=7 + fi, value=round(fc[fi], 2))
+                cell.fill = goldfill
+                cell.border = border
+                cell.number_format = '#,##0.00'
+
+    for c in range(1, len(best_headers) + 1):
+        best_ws.column_dimensions[get_column_letter(c)].width = 18
+    best_ws.auto_filter.ref = f"A1:{get_column_letter(len(best_headers))}1"
+
+    legend_r = len(df) + 3
+    best_ws.cell(row=legend_r, column=1, value="BEST METHOD TAB").font = Font(bold=True, size=12, color="1B5E20")
+    best_ws.cell(row=legend_r + 1, column=1, value="This tab automatically selects the forecasting method with the lowest MAPE for each item.")
+    best_ws.cell(row=legend_r + 2, column=1, value="Forecast cells contain formulas referencing the winning method's sheet.")
+    best_ws.cell(row=legend_r + 3, column=1, value="All 10 methods are evaluated per item; the one with lowest MAPE% wins.")
+
     if "Sheet" in wb.sheetnames:
         del wb["Sheet"]
     buf = io.BytesIO()
@@ -527,148 +614,181 @@ TEMPLATE = """<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Farmley Forecast</title>
+<title>Farmley Forecast Dashboard</title>
 <script src="https://cdn.plot.ly/plotly-2.35.0.min.js"></script>
-<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&display=swap" rel="stylesheet">
 <style>
+:root{--primary:#6366f1;--primary-dark:#4f46e5;--primary-light:#818cf8;--primary-bg:rgba(99,102,241,.06);--success:#10b981;--success-bg:#ecfdf5;--warning:#f59e0b;--warning-bg:#fffbeb;--danger:#ef4444;--danger-bg:#fef2f2;--surface:#ffffff;--surface-2:#f8fafc;--border:#e2e8f0;--border-light:#f1f5f9;--text:#0f172a;--text-2:#334155;--text-3:#64748b;--text-4:#94a3b8;--shadow-sm:0 1px 2px rgba(0,0,0,.04);--shadow:0 1px 3px rgba(0,0,0,.06),0 1px 2px rgba(0,0,0,.04);--shadow-md:0 4px 6px -1px rgba(0,0,0,.07),0 2px 4px -2px rgba(0,0,0,.05);--shadow-lg:0 10px 15px -3px rgba(0,0,0,.08),0 4px 6px -4px rgba(0,0,0,.04);--radius:12px;--radius-lg:16px;--radius-xl:20px}
 *{box-sizing:border-box;margin:0;padding:0}
-body{font-family:'Inter',system-ui,sans-serif;background:#f0f2f5;color:#1a1a2e;-webkit-font-smoothing:antialiased}
+body{font-family:'Inter',system-ui,-apple-system,sans-serif;background:linear-gradient(135deg,#f0f2f5 0%,#e8ecf4 50%,#f0f2f5 100%);color:var(--text);-webkit-font-smoothing:antialiased;min-height:100vh}
+
+/* ── ANIMATIONS ── */
+@keyframes fadeUp{from{opacity:0;transform:translateY(12px)}to{opacity:1;transform:translateY(0)}}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.7}}
+@keyframes shimmer{0%{background-position:-200% 0}100%{background-position:200% 0}}
+.fade-up{animation:fadeUp .4s ease-out both}
+.fade-up-1{animation-delay:.05s}.fade-up-2{animation-delay:.1s}.fade-up-3{animation-delay:.15s}.fade-up-4{animation-delay:.2s}
 
 /* ── NAV ── */
-.nav{background:#0f172a;padding:14px 32px;display:flex;align-items:center;gap:14px;position:sticky;top:0;z-index:50;box-shadow:0 2px 8px rgba(0,0,0,.15)}
-.nav-logo{width:36px;height:36px;background:#6366f1;border-radius:8px;display:flex;align-items:center;justify-content:center;color:#fff;font-weight:800;font-size:1.1rem}
-.nav h1{color:#fff;font-size:1.1rem;font-weight:700;letter-spacing:-.01em}
-.nav-sub{color:#94a3b8;font-size:.75rem;margin-left:-6px}
+.nav{background:linear-gradient(135deg,#0f172a 0%,#1e293b 100%);padding:0 32px;height:64px;display:flex;align-items:center;gap:14px;position:sticky;top:0;z-index:50;box-shadow:0 4px 20px rgba(0,0,0,.2);backdrop-filter:blur(12px)}
+.nav-logo{width:38px;height:38px;background:linear-gradient(135deg,var(--primary),#8b5cf6);border-radius:10px;display:flex;align-items:center;justify-content:center;color:#fff;font-weight:900;font-size:1.15rem;box-shadow:0 2px 8px rgba(99,102,241,.4)}
+.nav h1{color:#fff;font-size:1.15rem;font-weight:700;letter-spacing:-.02em}
+.nav-sub{color:#64748b;font-size:.72rem;margin-left:-6px;font-weight:500}
 .nav-right{margin-left:auto;display:flex;align-items:center;gap:10px}
-.nav-badge{background:rgba(99,102,241,.25);color:#a5b4fc;padding:4px 12px;border-radius:20px;font-size:.7rem;font-weight:600}
+.nav-badge{background:linear-gradient(135deg,rgba(99,102,241,.2),rgba(139,92,246,.2));color:#a5b4fc;padding:5px 14px;border-radius:20px;font-size:.72rem;font-weight:600;border:1px solid rgba(99,102,241,.2)}
 
-.wrap{max-width:1500px;margin:0 auto;padding:20px 24px 48px}
+.wrap{max-width:1520px;margin:0 auto;padding:24px 28px 60px}
 
 /* ── UPLOAD ── */
-.upload-wrap{max-width:560px;margin:80px auto}
-.upload-card{background:#fff;border-radius:16px;box-shadow:0 4px 24px rgba(0,0,0,.06);padding:48px 40px;text-align:center}
-.upload-card h2{font-size:1.3rem;margin-bottom:4px}
-.upload-card .sub{color:#64748b;font-size:.88rem;margin-bottom:28px}
-.drop{border:2px dashed #cbd5e1;border-radius:12px;padding:36px 20px;background:#f8fafc;transition:.2s;cursor:pointer;position:relative}
-.drop:hover,.drop.over{border-color:#6366f1;background:#eef2ff}
+.upload-wrap{max-width:580px;margin:100px auto}
+.upload-card{background:var(--surface);border-radius:var(--radius-xl);box-shadow:var(--shadow-lg);padding:56px 48px;text-align:center;border:1px solid var(--border)}
+.upload-card h2{font-size:1.5rem;font-weight:800;margin-bottom:6px;background:linear-gradient(135deg,var(--text),var(--primary));-webkit-background-clip:text;-webkit-text-fill-color:transparent}
+.upload-card .sub{color:var(--text-3);font-size:.9rem;margin-bottom:32px}
+.drop{border:2px dashed #cbd5e1;border-radius:var(--radius);padding:44px 24px;background:var(--surface-2);transition:.25s;cursor:pointer;position:relative}
+.drop:hover,.drop.over{border-color:var(--primary);background:#eef2ff;transform:scale(1.01)}
 .drop input{position:absolute;inset:0;opacity:0;cursor:pointer}
-.drop h3{font-size:.95rem;color:#334155;margin-bottom:4px}
-.drop p{font-size:.8rem;color:#94a3b8}
-#fileName{display:none;margin-top:10px;font-size:.85rem;color:#6366f1;font-weight:600}
-.btn{display:inline-flex;align-items:center;justify-content:center;gap:6px;padding:10px 22px;background:#6366f1;color:#fff;border:none;border-radius:8px;cursor:pointer;font-size:.88rem;font-weight:600;font-family:inherit;text-decoration:none;transition:.15s}
-.btn:hover{background:#4f46e5}
+.drop h3{font-size:1rem;color:var(--text-2);margin-bottom:6px;font-weight:600}
+.drop p{font-size:.82rem;color:var(--text-4)}
+#fileName{display:none;margin-top:12px;font-size:.88rem;color:var(--primary);font-weight:600}
+.btn{display:inline-flex;align-items:center;justify-content:center;gap:7px;padding:11px 24px;background:linear-gradient(135deg,var(--primary),var(--primary-dark));color:#fff;border:none;border-radius:10px;cursor:pointer;font-size:.88rem;font-weight:600;font-family:inherit;text-decoration:none;transition:all .2s;box-shadow:0 2px 8px rgba(99,102,241,.25)}
+.btn:hover{transform:translateY(-1px);box-shadow:0 4px 16px rgba(99,102,241,.35);background:linear-gradient(135deg,var(--primary-light),var(--primary))}
+.btn:active{transform:translateY(0)}
 .btn-block{width:100%}
-.btn-green{background:#10b981}.btn-green:hover{background:#059669}
-.btn-ghost{background:transparent;color:#6366f1;border:1px solid #e2e8f0}.btn-ghost:hover{background:#f8fafc}
-.btn-sm{padding:4px 10px;font-size:.72rem;border-radius:6px}
+.btn-green{background:linear-gradient(135deg,#10b981,#059669);box-shadow:0 2px 8px rgba(16,185,129,.25)}.btn-green:hover{box-shadow:0 4px 16px rgba(16,185,129,.35)}
+.btn-ghost{background:transparent;color:var(--primary);border:1px solid var(--border);box-shadow:none}.btn-ghost:hover{background:var(--primary-bg);border-color:var(--primary);box-shadow:none;transform:none}
+.btn-sm{padding:5px 11px;font-size:.72rem;border-radius:6px;box-shadow:none}
 
 /* ── LAYOUT ── */
-.dash{display:grid;grid-template-columns:310px 1fr;gap:20px}
-@media(max-width:960px){.dash{grid-template-columns:1fr}}
+.dash{display:grid;grid-template-columns:320px 1fr;gap:24px}
+@media(max-width:1000px){.dash{grid-template-columns:1fr}}
 
 /* ── SIDEBAR ── */
-.side{position:sticky;top:72px;max-height:calc(100vh - 90px);overflow-y:auto;display:flex;flex-direction:column;gap:12px}
-.side::-webkit-scrollbar{width:3px}.side::-webkit-scrollbar-thumb{background:#cbd5e1;border-radius:3px}
-@media(max-width:960px){.side{position:static;max-height:none}}
-.panel{background:#fff;border-radius:12px;box-shadow:0 1px 4px rgba(0,0,0,.05);padding:16px;border:1px solid #e8ecf1}
-.panel-title{font-size:.78rem;font-weight:700;color:#0f172a;text-transform:uppercase;letter-spacing:.06em;margin-bottom:12px;display:flex;align-items:center;gap:6px}
-.panel-title svg{width:14px;height:14px;color:#6366f1}
+.side{position:sticky;top:80px;max-height:calc(100vh - 96px);overflow-y:auto;display:flex;flex-direction:column;gap:14px;padding-right:4px}
+.side::-webkit-scrollbar{width:4px}.side::-webkit-scrollbar-thumb{background:#cbd5e1;border-radius:4px}
+@media(max-width:1000px){.side{position:static;max-height:none}}
+.panel{background:var(--surface);border-radius:var(--radius);box-shadow:var(--shadow);padding:18px;border:1px solid var(--border);transition:box-shadow .2s}
+.panel:hover{box-shadow:var(--shadow-md)}
+.panel-title{font-size:.76rem;font-weight:700;color:var(--text);text-transform:uppercase;letter-spacing:.07em;margin-bottom:14px;display:flex;align-items:center;gap:7px}
+.panel-title svg{width:15px;height:15px;color:var(--primary)}
 
 /* ── CHECKBOX FILTER ── */
-.fgroup{margin-bottom:14px}
-.fgroup-label{font-size:.72rem;font-weight:700;color:#475569;text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px}
-.fgroup-bar{display:flex;align-items:center;gap:4px;margin-bottom:6px}
-.fgroup-bar input[type=text]{flex:1;padding:6px 10px;border:1px solid #e2e8f0;border-radius:6px;font-size:.78rem;font-family:inherit;outline:none;transition:.15s}
-.fgroup-bar input[type=text]:focus{border-color:#6366f1;box-shadow:0 0 0 2px rgba(99,102,241,.12)}
-.cbox-list{max-height:180px;overflow-y:auto;border:1px solid #e8ecf1;border-radius:8px;background:#fafbfc;padding:4px 0}
+.fgroup{margin-bottom:16px}
+.fgroup-label{font-size:.7rem;font-weight:700;color:var(--text-3);text-transform:uppercase;letter-spacing:.06em;margin-bottom:7px}
+.fgroup-bar{display:flex;align-items:center;gap:5px;margin-bottom:7px}
+.fgroup-bar input[type=text]{flex:1;padding:7px 12px;border:1px solid var(--border);border-radius:8px;font-size:.8rem;font-family:inherit;outline:none;transition:.2s;background:var(--surface)}
+.fgroup-bar input[type=text]:focus{border-color:var(--primary);box-shadow:0 0 0 3px rgba(99,102,241,.1)}
+.cbox-list{max-height:180px;overflow-y:auto;border:1px solid var(--border);border-radius:10px;background:var(--surface-2);padding:4px 0}
 .cbox-list::-webkit-scrollbar{width:4px}.cbox-list::-webkit-scrollbar-thumb{background:#cbd5e1;border-radius:4px}
-.cbox-list label{display:flex;align-items:center;gap:8px;padding:5px 10px;font-size:.8rem;color:#334155;cursor:pointer;transition:.1s;user-select:none}
-.cbox-list label:hover{background:#eef2ff}
+.cbox-list label{display:flex;align-items:center;gap:9px;padding:6px 12px;font-size:.8rem;color:var(--text-2);cursor:pointer;transition:.15s;user-select:none;border-radius:6px;margin:1px 4px}
+.cbox-list label:hover{background:var(--primary-bg);color:var(--primary)}
 .cbox-list label.hidden{display:none}
-.cbox-list input[type=checkbox]{width:15px;height:15px;accent-color:#6366f1;cursor:pointer;flex-shrink:0}
+.cbox-list input[type=checkbox]{width:16px;height:16px;accent-color:var(--primary);cursor:pointer;flex-shrink:0;border-radius:4px}
 .cbox-list .cname{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.sel-info{font-size:.7rem;color:#94a3b8;margin-top:4px}
+.sel-info{font-size:.7rem;color:var(--text-4);margin-top:5px;font-weight:500}
 
-/* single select */
-.sselect{margin-bottom:14px}
-.sselect label{display:block;font-size:.72rem;font-weight:700;color:#475569;text-transform:uppercase;letter-spacing:.05em;margin-bottom:5px}
-.sselect select{width:100%;padding:8px 10px;border:1px solid #e2e8f0;border-radius:6px;font-size:.82rem;font-family:inherit;background:#fff;outline:none;cursor:pointer;appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='10' fill='%2394a3b8'%3E%3Cpath d='M5 7L1 3h8z'/%3E%3C/svg%3E");background-repeat:no-repeat;background-position:right 10px center}
+.sselect{margin-bottom:16px}
+.sselect label{display:block;font-size:.7rem;font-weight:700;color:var(--text-3);text-transform:uppercase;letter-spacing:.06em;margin-bottom:6px}
+.sselect select{width:100%;padding:9px 12px;border:1px solid var(--border);border-radius:8px;font-size:.84rem;font-family:inherit;background:var(--surface);outline:none;cursor:pointer;appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='10' fill='%2394a3b8'%3E%3Cpath d='M5 7L1 3h8z'/%3E%3C/svg%3E");background-repeat:no-repeat;background-position:right 12px center;transition:.2s}
+.sselect select:focus{border-color:var(--primary);box-shadow:0 0 0 3px rgba(99,102,241,.1)}
 
 /* ── STATS ── */
-.stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:10px;margin-bottom:16px}
-.st{background:#fff;border:1px solid #e8ecf1;border-radius:10px;padding:14px 16px}
-.st-label{font-size:.68rem;font-weight:700;color:#94a3b8;text-transform:uppercase;letter-spacing:.05em}
-.st-val{font-size:1.15rem;font-weight:700;color:#0f172a;margin-top:2px}
+.stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:12px;margin-bottom:20px}
+.st{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:18px 20px;transition:all .2s;position:relative;overflow:hidden}
+.st:hover{box-shadow:var(--shadow-md);transform:translateY(-2px)}
+.st::before{content:'';position:absolute;top:0;left:0;right:0;height:3px;border-radius:var(--radius) var(--radius) 0 0}
+.st:nth-child(1)::before{background:linear-gradient(90deg,var(--primary),#8b5cf6)}
+.st:nth-child(2)::before{background:linear-gradient(90deg,var(--success),#34d399)}
+.st:nth-child(3)::before{background:linear-gradient(90deg,var(--warning),#fbbf24)}
+.st:nth-child(4)::before{background:linear-gradient(90deg,#06b6d4,#22d3ee)}
+.st-label{font-size:.68rem;font-weight:600;color:var(--text-4);text-transform:uppercase;letter-spacing:.06em}
+.st-val{font-size:1.25rem;font-weight:800;color:var(--text);margin-top:4px;letter-spacing:-.02em}
 
 /* ── CARDS ── */
-.card{background:#fff;border-radius:12px;box-shadow:0 1px 4px rgba(0,0,0,.05);padding:20px;margin-bottom:16px;border:1px solid #e8ecf1}
-.item-card{border-left:3px solid #6366f1}
-.item-head{display:flex;align-items:center;gap:8px;margin-bottom:12px;flex-wrap:wrap}
-.item-head h2{font-size:1rem;font-weight:700;color:#0f172a;margin:0}
-.tag{font-size:.68rem;font-weight:600;background:#f1f5f9;color:#64748b;padding:3px 9px;border-radius:20px}
-.section-lbl{font-size:.8rem;font-weight:700;color:#0f172a;margin:18px 0 8px;display:flex;align-items:center;gap:6px}
-.section-lbl svg{width:14px;height:14px;color:#6366f1}
+.card{background:var(--surface);border-radius:var(--radius-lg);box-shadow:var(--shadow);padding:24px;margin-bottom:20px;border:1px solid var(--border);transition:all .25s}
+.card:hover{box-shadow:var(--shadow-md)}
+.item-card{border-left:4px solid var(--primary);position:relative}
+.item-card::before{content:'';position:absolute;top:0;left:-4px;bottom:0;width:4px;background:linear-gradient(180deg,var(--primary),#8b5cf6);border-radius:var(--radius-lg) 0 0 var(--radius-lg)}
+.item-head{display:flex;align-items:center;gap:10px;margin-bottom:16px;flex-wrap:wrap}
+.item-head h2{font-size:1.05rem;font-weight:700;color:var(--text);margin:0}
+.tag{font-size:.68rem;font-weight:600;background:var(--border-light);color:var(--text-3);padding:4px 11px;border-radius:20px;transition:.15s}
+.tag:hover{background:#e2e8f0}
+.section-lbl{font-size:.82rem;font-weight:700;color:var(--text);margin:22px 0 10px;display:flex;align-items:center;gap:7px}
+.section-lbl svg{width:15px;height:15px;color:var(--primary)}
 
 /* ── TABLES ── */
 table{width:100%;border-collapse:separate;border-spacing:0;font-size:.8rem}
-thead th{background:#f8fafc;color:#64748b;padding:9px 12px;text-align:left;font-weight:600;font-size:.72rem;text-transform:uppercase;letter-spacing:.04em;border-bottom:2px solid #e2e8f0;position:sticky;top:0;z-index:1}
-tbody td{padding:9px 12px;border-bottom:1px solid #f1f5f9;color:#334155}
-tbody tr:hover{background:#f8fafc}
+thead th{background:linear-gradient(180deg,var(--surface-2),#eef0f4);color:var(--text-3);padding:10px 14px;text-align:left;font-weight:600;font-size:.72rem;text-transform:uppercase;letter-spacing:.05em;border-bottom:2px solid var(--border);position:sticky;top:0;z-index:1}
+tbody td{padding:10px 14px;border-bottom:1px solid var(--border-light);color:var(--text-2);transition:background .15s}
+tbody tr:hover td{background:var(--primary-bg)}
 .fc-val{background:#fffbeb;font-weight:600;color:#92400e;font-variant-numeric:tabular-nums}
-.scroll-tbl{overflow-x:auto;max-height:420px;overflow-y:auto;border:1px solid #e8ecf1;border-radius:8px}
+.scroll-tbl{overflow-x:auto;max-height:420px;overflow-y:auto;border:1px solid var(--border);border-radius:10px}
+
+/* ── BEST METHOD HIGHLIGHT ── */
+.best-row td{background:linear-gradient(90deg,rgba(16,185,129,.08),rgba(16,185,129,.03))!important;font-weight:600}
+.best-row td:first-child{position:relative;padding-left:22px}
+.best-row td:first-child::before{content:'';position:absolute;left:6px;top:50%;transform:translateY(-50%);width:8px;height:8px;background:var(--success);border-radius:50%;box-shadow:0 0 6px rgba(16,185,129,.4)}
+.best-badge{display:inline-flex;align-items:center;gap:4px;background:linear-gradient(135deg,#059669,#10b981);color:#fff;padding:3px 10px;border-radius:20px;font-size:.66rem;font-weight:700;letter-spacing:.02em;box-shadow:0 2px 6px rgba(16,185,129,.3)}
+.best-badge svg{width:10px;height:10px}
 
 /* ── BADGES ── */
-.badge{display:inline-block;padding:3px 10px;border-radius:20px;font-size:.7rem;font-weight:600}
-.badge-good{background:#ecfdf5;color:#065f46}
-.badge-fair{background:#fffbeb;color:#92400e}
-.badge-poor{background:#fef2f2;color:#991b1b}
+.badge{display:inline-flex;align-items:center;padding:4px 12px;border-radius:20px;font-size:.7rem;font-weight:600;gap:4px}
+.badge-good{background:var(--success-bg);color:#065f46}
+.badge-fair{background:var(--warning-bg);color:#92400e}
+.badge-poor{background:var(--danger-bg);color:#991b1b}
 
 /* ── METHOD TABS ── */
-.tabs{display:flex;gap:4px;margin-bottom:14px;flex-wrap:wrap;padding:3px;background:#f1f5f9;border-radius:8px}
-.tab{padding:7px 14px;cursor:pointer;font-size:.76rem;font-weight:500;color:#64748b;border-radius:6px;transition:.15s}
-.tab:hover{color:#334155;background:#e8ecf1}
-.tab.active{background:#fff;color:#6366f1;font-weight:600;box-shadow:0 1px 3px rgba(0,0,0,.06)}
+.tabs{display:flex;gap:4px;margin-bottom:16px;flex-wrap:wrap;padding:4px;background:var(--border-light);border-radius:10px}
+.tab{padding:8px 16px;cursor:pointer;font-size:.76rem;font-weight:500;color:var(--text-3);border-radius:8px;transition:.2s}
+.tab:hover{color:var(--text-2);background:rgba(255,255,255,.5)}
+.tab.active{background:var(--surface);color:var(--primary);font-weight:600;box-shadow:var(--shadow-sm)}
 .tab-content{display:none}.tab-content.active{display:block}
-.method-desc{line-height:1.7;font-size:.86rem;color:#475569}
-.method-desc strong{color:#0f172a}
-.method-desc code{background:#eef2ff;color:#6366f1;padding:2px 6px;border-radius:4px;font-size:.76rem}
+.method-desc{line-height:1.75;font-size:.86rem;color:var(--text-2)}
+.method-desc strong{color:var(--text)}
+.method-desc code{background:var(--primary-bg);color:var(--primary);padding:2px 7px;border-radius:5px;font-size:.78rem;font-weight:500}
 
-.guide{margin-top:20px;padding:18px;background:#f8fafc;border-radius:10px;border:1px solid #e8ecf1}
-.guide h3{font-size:.88rem;font-weight:700;color:#0f172a;margin-bottom:10px}
-.guide-note{margin-top:12px;font-size:.78rem;color:#64748b;line-height:1.6}
-.guide-note strong{color:#334155}
+.guide{margin-top:24px;padding:20px;background:linear-gradient(135deg,var(--surface-2),#f0f4ff);border-radius:var(--radius);border:1px solid var(--border)}
+.guide h3{font-size:.92rem;font-weight:700;color:var(--text);margin-bottom:12px}
+.guide-note{margin-top:14px;font-size:.8rem;color:var(--text-3);line-height:1.7}
+.guide-note strong{color:var(--text-2)}
 
-.empty{text-align:center;padding:60px 20px;color:#94a3b8}
-.empty p{font-size:.9rem}.empty strong{color:#64748b}
+.empty{text-align:center;padding:72px 24px;color:var(--text-4)}
+.empty p{font-size:.92rem}.empty strong{color:var(--text-3)}
 
-footer{text-align:center;padding:28px 20px;color:#94a3b8;font-size:.72rem;border-top:1px solid #e8ecf1;margin-top:12px}
-footer a{color:#6366f1;text-decoration:none}
+footer{text-align:center;padding:32px 24px;color:var(--text-4);font-size:.74rem;border-top:1px solid var(--border);margin-top:16px}
+footer a{color:var(--primary);text-decoration:none;font-weight:500}
+footer a:hover{text-decoration:underline}
 </style>
 </head>
 <body>
 
 <div class="nav">
     <div class="nav-logo">F</div>
-    <h1>Farmley Forecast</h1>
-    <span class="nav-sub">Sales Dashboard</span>
+    <div>
+        <h1>Farmley Forecast</h1>
+        <span class="nav-sub">Sales Forecasting Dashboard</span>
+    </div>
     {% if data_loaded %}
-    <div class="nav-right"><span class="nav-badge">{{total_items}} Products</span></div>
+    <div class="nav-right">
+        <span class="nav-badge">{{total_items}} Products</span>
+        <span class="nav-badge">{{n_months}} Months Data</span>
+    </div>
     {% endif %}
 </div>
 
 {% if not data_loaded %}
-<div class="upload-wrap">
+<div class="upload-wrap fade-up">
     <div class="upload-card">
         <h2>Upload Sales Data</h2>
         <p class="sub">Excel file with item-wise monthly sales order data</p>
         <form method="post" enctype="multipart/form-data" action="/upload">
             <div class="drop" id="dropZone">
+                <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="#94a3b8" stroke-width="1.5" style="margin-bottom:12px"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
                 <h3>Click to browse or drag & drop</h3>
-                <p>.xlsx or .xls</p>
+                <p>.xlsx or .xls files supported</p>
                 <span id="fileName"></span>
                 <input type="file" name="file" accept=".xlsx,.xls" required id="fileInput">
             </div>
-            <button type="submit" class="btn btn-block" style="margin-top:18px">Upload & Analyze</button>
+            <button type="submit" class="btn btn-block" style="margin-top:22px;padding:14px 24px;font-size:.95rem">Upload & Analyze</button>
         </form>
     </div>
 </div>
@@ -690,13 +810,12 @@ if(dz){
 
 <!-- ── SIDEBAR ── -->
 <div class="side">
-    <div class="panel">
+    <div class="panel fade-up">
         <div class="panel-title">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"/></svg>
             Filters
         </div>
 
-        <!-- Groups -->
         <div class="fgroup">
             <div class="fgroup-label">Product Group</div>
             <div class="fgroup-bar">
@@ -712,7 +831,6 @@ if(dz){
             <div class="sel-info" id="grp_info"></div>
         </div>
 
-        <!-- Items -->
         <div class="fgroup">
             <div class="fgroup-label">Item Name</div>
             <div class="fgroup-bar">
@@ -728,7 +846,6 @@ if(dz){
             <div class="sel-info" id="itm_info"></div>
         </div>
 
-        <!-- Metric -->
         <div class="sselect">
             <label>Metric</label>
             <select name="metric">
@@ -738,7 +855,6 @@ if(dz){
             </select>
         </div>
 
-        <!-- Methods -->
         <div class="fgroup">
             <div class="fgroup-label">Forecast Methods</div>
             <div class="fgroup-bar">
@@ -753,26 +869,26 @@ if(dz){
             <div class="sel-info" id="mth_info"></div>
         </div>
 
-        <button type="submit" class="btn btn-block" style="margin-top:4px">Apply Filters</button>
+        <button type="submit" class="btn btn-block" style="margin-top:6px">Apply Filters</button>
     </div>
 
-    <div class="panel">
+    <div class="panel fade-up fade-up-1">
         <div class="panel-title">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
             Export
         </div>
-        <p style="font-size:.76rem;color:#94a3b8;margin-bottom:8px">Excel with real formulas, MAE/MAPE, one tab per method.</p>
+        <p style="font-size:.76rem;color:var(--text-4);margin-bottom:10px">Excel with formulas, Best Method tab, MAE/MAPE metrics, one tab per method.</p>
         <a href="/download?methods={{selected_methods|join(',')}}" class="btn btn-green btn-block">Download Forecast Excel</a>
     </div>
 
-    <div class="panel">
+    <div class="panel fade-up fade-up-2">
         <a href="/" class="btn btn-ghost btn-block">Upload New File</a>
     </div>
 </div>
 
 <!-- ── MAIN ── -->
 <div>
-    <div class="stats">
+    <div class="stats fade-up">
         <div class="st"><div class="st-label">Total Items</div><div class="st-val">{{total_items}}</div></div>
         <div class="st"><div class="st-label">Data Through</div><div class="st-val">{{last_month}}</div></div>
         <div class="st"><div class="st-label">Forecast Range</div><div class="st-val">{{forecast_months[0]}} - {{forecast_months[-1]}}</div></div>
@@ -780,23 +896,25 @@ if(dz){
     </div>
 
     {% if overall_chart %}
-    <div class="card" style="border-left:3px solid #10b981">
+    <div class="card fade-up fade-up-1" style="border-left:4px solid var(--success);position:relative;overflow:hidden">
+        <div style="position:absolute;top:0;left:-4px;bottom:0;width:4px;background:linear-gradient(180deg,var(--success),#34d399);border-radius:var(--radius-lg) 0 0 var(--radius-lg)"></div>
         <div class="item-head">
             <h2>Overall Aggregate</h2>
-            <span class="tag" style="background:#ecfdf5;color:#065f46">{{results|length}} items combined</span>
+            <span class="tag" style="background:var(--success-bg);color:#065f46">{{results|length}} items combined</span>
             <span class="tag">{{selected_metric}}</span>
         </div>
-        <div id="chart_overall" style="width:100%;height:460px"></div>
+        <div id="chart_overall" style="width:100%;height:480px"></div>
         <script>Plotly.newPlot('chart_overall',{{overall_chart|safe}}.data,{{overall_chart|safe}}.layout,{responsive:true})</script>
     </div>
     {% endif %}
 
     {% if group_charts %}
     {% for gc in group_charts %}
-    <div class="card" style="border-left:3px solid #f59e0b">
+    <div class="card fade-up" style="border-left:4px solid var(--warning);position:relative;overflow:hidden">
+        <div style="position:absolute;top:0;left:-4px;bottom:0;width:4px;background:linear-gradient(180deg,var(--warning),#fbbf24);border-radius:var(--radius-lg) 0 0 var(--radius-lg)"></div>
         <div class="item-head">
             <h2>{{gc.group}}</h2>
-            <span class="tag" style="background:#fffbeb;color:#92400e">{{gc.count}} items</span>
+            <span class="tag" style="background:var(--warning-bg);color:#92400e">{{gc.count}} items</span>
             <span class="tag">{{selected_metric}}</span>
             <span class="tag" style="background:#f5f3ff;color:#7c3aed">Group Total</span>
         </div>
@@ -807,11 +925,14 @@ if(dz){
     {% endif %}
 
     {% for item_data in results %}
-    <div class="card item-card">
+    <div class="card item-card fade-up">
         <div class="item-head">
             <h2>{{item_data.item}}</h2>
             <span class="tag">{{item_data.group}}</span>
             <span class="tag">{{selected_metric}}</span>
+            {% if item_data.best_method %}
+            <span class="best-badge"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M22 11.08V12a10 10 0 11-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg> Best: {{item_data.best_method}}</span>
+            {% endif %}
         </div>
         <div id="chart_{{loop.index0}}" style="width:100%;height:440px"></div>
         <script>Plotly.newPlot('chart_{{loop.index0}}',{{item_data.chart_data|safe}}.data,{{item_data.chart_data|safe}}.layout,{responsive:true})</script>
@@ -838,15 +959,15 @@ if(dz){
         <div class="section-lbl">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 11.08V12a10 10 0 11-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
             Backtest Accuracy
-            <span style="font-weight:400;font-size:.7rem;color:#94a3b8;margin-left:4px">(last 3 months held out)</span>
+            <span style="font-weight:400;font-size:.7rem;color:var(--text-4);margin-left:4px">(last 3 months held out)</span>
         </div>
         <div class="scroll-tbl">
         <table>
             <thead><tr><th>Method</th><th>MAE</th><th>MAPE (%)</th><th>Rating</th></tr></thead>
             <tbody>
             {% for acc in item_data.accuracy %}
-            <tr>
-                <td style="font-weight:500">{{acc.method}}</td>
+            <tr class="{% if acc.method == item_data.best_method %}best-row{% endif %}">
+                <td style="font-weight:500">{{acc.method}}{% if acc.method == item_data.best_method %} <span class="best-badge" style="font-size:.6rem;padding:2px 7px">BEST</span>{% endif %}</td>
                 <td>{{acc.mae if acc.mae is not none else 'N/A'}}</td>
                 <td>{{acc.mape if acc.mape is not none else 'N/A'}}</td>
                 <td>{% if acc.rating == 'Good' %}<span class="badge badge-good">Good</span>
@@ -863,12 +984,15 @@ if(dz){
     {% endfor %}
 
     {% if not results %}
-    <div class="card"><div class="empty"><p>Select items and methods, then click <strong>Apply Filters</strong>.</p></div></div>
+    <div class="card fade-up"><div class="empty"><p>Select items and methods, then click <strong>Apply Filters</strong>.</p></div></div>
     {% endif %}
 
     <!-- METHOD EXPLANATIONS -->
-    <div class="card">
-        <h2 style="font-size:1rem;font-weight:700;color:#0f172a;margin-bottom:14px">Forecasting Methods</h2>
+    <div class="card fade-up">
+        <h2 style="font-size:1.05rem;font-weight:700;color:var(--text);margin-bottom:16px;display:flex;align-items:center;gap:8px">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--primary)" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 015.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+            Forecasting Methods
+        </h2>
         <div class="tabs" id="methodTabs">
         {% for mname in method_descriptions %}
             <div class="tab {% if loop.first %}active{% endif %}" onclick="showTab(this,'mt_{{loop.index0}}')">{{mname}}</div>
@@ -896,7 +1020,8 @@ if(dz){
             </div>
             <div class="guide-note">
                 <strong>MAE</strong> = avg absolute difference (lower is better, same units as data).<br>
-                <strong>MAPE</strong> = avg % error. Below 30% = Good, 30-60% = Fair, above 60% = Poor.
+                <strong>MAPE</strong> = avg % error. Below 30% = Good, 30-60% = Fair, above 60% = Poor.<br>
+                <strong>Best Method</strong> = automatically selected per item (lowest MAPE). Highlighted green in accuracy table and included in Excel "Best Method" tab.
             </div>
         </div>
     </div>
@@ -908,7 +1033,7 @@ if(dz){
 {% endif %}
 
 <footer>
-    Farmley Forecast Dashboard v5.0 &bull; Flask + Plotly &bull; <a href="https://github.com/Rameshwarnaik013/farmley-forecast-dashboard" target="_blank">GitHub</a>
+    Farmley Forecast Dashboard v6.0 &bull; Flask + Plotly &bull; <a href="https://github.com/Rameshwarnaik013/farmley-forecast-dashboard" target="_blank">GitHub</a>
 </footer>
 
 <script>
@@ -941,7 +1066,6 @@ function showTab(el,id){
     card.querySelectorAll('.tab-content').forEach(function(c){c.classList.remove('active')});
     card.querySelector('#'+id).classList.add('active');
 }
-// Init counts
 ['grp','itm','mth'].forEach(function(id){
     var el=document.getElementById(id);
     if(el){
@@ -1044,12 +1168,21 @@ def forecast():
                 rating = "Good" if mape < 30 else ("Fair" if mape < 60 else "Poor")
             accuracy.append({"method": m, "mae": mae, "mape": mape, "rating": rating})
 
+        # Find best method (lowest MAPE) for this item
+        best_method_name = None
+        best_mape_val = float("inf")
+        for acc_entry in accuracy:
+            if acc_entry["mape"] is not None and acc_entry["mape"] < best_mape_val:
+                best_mape_val = acc_entry["mape"]
+                best_method_name = acc_entry["method"]
+
         chart_json = build_chart_json(item_name, selected_metric, hist, forecasts, month_cols, forecast_months)
         results.append({
             "item": item_name, "group": group,
             "chart_data": chart_json,
             "forecasts": forecasts,
             "accuracy": accuracy,
+            "best_method": best_method_name,
         })
 
     # Build overall aggregate chart (sum across all selected items)
